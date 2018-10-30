@@ -25,9 +25,10 @@ Features
 - SF7 to SF12
 - status updates
 - can forward to two servers
+- PACKET_PUSH_ACK processing
+- PACKET_PULL_DATA processing
 
 Not (yet) supported:
-- PACKET_PUSH_ACK processing
 - SF7BW250 modulation
 - FSK modulation
 - downstream messages (tx)
