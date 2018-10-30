@@ -22,6 +22,9 @@
 
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 using namespace std;
 
@@ -29,6 +32,9 @@ using namespace std;
 
 #include <wiringPi.h>
 #include <wiringPiSPI.h>
+
+#define STRINGIFY(x)	#x
+#define STR(x)	STRINGIFY(x)
 
 typedef bool boolean;
 typedef unsigned char byte;
@@ -71,12 +77,12 @@ int RST   = 0;
 sf_t sf = SF7;
 
 // Set center frequency
-uint32_t  freq = 868100000; // in Mhz! (868.1)
+uint32_t  freq = 923200000; // in Mhz! (868.1)
 
 // Set location
-float lat=0.0;
-float lon=0.0;
-int   alt=0;
+float lat=100.0;
+float lon=13.0;
+int   alt=1;
 
 /* Informal status fields */
 static char platform[24]    = "Single Channel Gateway";  /* platform definition */
@@ -84,10 +90,26 @@ static char email[40]       = "";                        /* used for contact ema
 static char description[64] = "";                        /* used for free form description */
 
 // define servers
+#define PUSH_TIMEOUT_MS 100
+#define PULL_TIMEOUT_MS 200
+
+static struct timeval push_timeout_half = {0, (PUSH_TIMEOUT_MS * 500)};
+static struct timeval pull_timeout_half = {0, (PULL_TIMEOUT_MS * 1000)};
+
 // TODO: use host names and dns
-#define SERVER1 "54.72.145.119"    // The Things Network: croft.thethings.girovito.nl
+//#define SERVER1 "localhost"    // The Things Network: croft.thethings.girovito.nl
+#define SERVER1 "127.0.0.1"    // The Things Network: croft.thethings.girovito.nl
 //#define SERVER2 "192.168.1.10"      // local
-#define PORT 1700                   // The port on which to send data
+#define PORT 1680                   // The port on which to send data
+// network configuration variablrs 
+#define gateway_id  "B827EBFFFF3658DA" // lora gateway mac address
+//#define gateway_id  "AABBCCDD00112233" // lora gateway mac address
+static uint64_t lgwm = 0; // lora gateway mac address
+static char serv_addr[64] = STR(SERVER1);
+static char serv_port_up[8] =STR(PORT);
+static uint32_t net_mac_h; //MSN network order
+static uint32_t net_mac_l; //LSN network order
+static int sock_up; //socket for upstream
 
 // #############################################
 // #############################################
@@ -317,7 +339,11 @@ void sendudp(char *msg, int length) {
 
 //send the update
 #ifdef SERVER1
-    inet_aton(SERVER1 , &si_other.sin_addr);
+    if(inet_aton(SERVER1 , &si_other.sin_addr)==0)
+    {
+	fprintf(stderr, "inet_aton() failed\n");
+	exit(1);
+    }
     if (sendto(s, (char *)msg, length, 0 , (struct sockaddr *) &si_other, slen)==-1)
     {
         die("sendto()");
@@ -341,10 +367,22 @@ void sendstat() {
 
     int stat_index=0;
 
+    int i;
+    uint8_t buff_ack[32];
+
+    i = setsockopt(sock_up, SOL_SOCKET, SO_RCVTIMEO, (void*) &push_timeout_half, sizeof push_timeout_half);
+    if (i != 0) {
+	printf("ERR: [up] sertsockopt returned %s\n", strerror (errno));
+	exit(EXIT_FAILURE);
+    }
+
     /* pre-fill the data buffer with fixed fields */
     status_report[0] = PROTOCOL_VERSION;
     status_report[3] = PKT_PUSH_DATA;
+    *(uint32_t *)(status_report + 4) = net_mac_h;
+    *(uint32_t *)(status_report + 8) = net_mac_l;
 
+/*
     status_report[4] = (unsigned char)ifr.ifr_hwaddr.sa_data[0];
     status_report[5] = (unsigned char)ifr.ifr_hwaddr.sa_data[1];
     status_report[6] = (unsigned char)ifr.ifr_hwaddr.sa_data[2];
@@ -353,6 +391,7 @@ void sendstat() {
     status_report[9] = (unsigned char)ifr.ifr_hwaddr.sa_data[3];
     status_report[10] = (unsigned char)ifr.ifr_hwaddr.sa_data[4];
     status_report[11] = (unsigned char)ifr.ifr_hwaddr.sa_data[5];
+*/
 
     /* start composing datagram with the header */
     uint8_t token_h = (uint8_t)rand(); /* random token */
@@ -364,22 +403,51 @@ void sendstat() {
     /* get timestamp for statistics */
     t = time(NULL);
     strftime(stat_timestamp, sizeof stat_timestamp, "%F %T %Z", gmtime(&t));
+    int j = snprintf((char *)(status_report + stat_index), STATUS_SIZE-stat_index,
+		    "{\"stat\":{\"time\":\"%s\",\"lati\":%.5f,\"long\":%.5f,\"alti\":%i,\"rxnb\":%u,\"rxok\":%u,\"rxfw\":%u,\"ackr\":%.1f,\"dwnb\":%u,\"txnb\":%u}}", stat_timestamp, lat, lon, (int)alt, cp_nb_rx_rcv,
+		    cp_nb_rx_ok, cp_up_pkt_fwd, (float)20, 0, 0);
 
-    int j = snprintf((char *)(status_report + stat_index), STATUS_SIZE-stat_index, "{\"stat\":{\"time\":\"%s\",\"lati\":%.5f,\"long\":%.5f,\"alti\":%i,\"rxnb\":%u,\"rxok\":%u,\"rxfw\":%u,\"ackr\":%.1f,\"dwnb\":%u,\"txnb\":%u,\"pfrm\":\"%s\",\"mail\":\"%s\",\"desc\":\"%s\"}}", stat_timestamp, lat, lon, (int)alt, cp_nb_rx_rcv, cp_nb_rx_ok, cp_up_pkt_fwd, (float)0, 0, 0,platform,email,description);
+/*    int j = snprintf((char *)(status_report + stat_index), STATUS_SIZE-stat_index,
+		    "{\"stat\":{\"time\":\"%s\",\"lati\":%.5f,\"long\":%.5f, \
+		    \"alti\":%i,\"rxnb\":%u,\"rxok\":%u,\"rxfw\":%u,\"ackr\":%.1f, \
+		    \"dwnb\":%u,\"txnb\":%u,\"pfrm\":\"%s\",\"mail\":\"%s\", \
+		    \"desc\":\"%s\"}}", stat_timestamp, lat, lon, (int)alt, cp_nb_rx_rcv,
+		    cp_nb_rx_ok, cp_up_pkt_fwd, (float)0, 0, 0,platform,email,description); */
     stat_index += j;
     status_report[stat_index] = 0; /* add string terminator, for safety */
 
     printf("stat update: %s\n", (char *)(status_report+12)); /* DEBUG: display JSON stat */
 
     //send the update
-    sendudp(status_report, stat_index);
+    send(sock_up, (void *)status_report, stat_index, 0);
+    //sendudp(status_report, stat_index);
+    for (int j = 0; j<2; ++j) {
+   	 i = recv(sock_up, (void *)buff_ack, sizeof buff_ack, 0);
+    	if (i == -1) {
 
+		printf("INFO: [up] ack receive is retured (%s)\n", strerror(i));
+		if(errno == EAGAIN) {
+			continue;
+		} else {
+			break;
+		}
+	} else if ((i < 4) || (buff_ack[0] != PROTOCOL_VERSION) || (buff_ack[3] != PKT_PUSH_ACK)) {
+		continue;
+	} else if ((buff_ack[1] != token_h) || (buff_ack[2] != token_l)) {
+		continue;
+	} else {
+		printf("INFO: [up] PUSH ACK received\n");
+		break;
+	}
+    }
+            
 }
 
 void receivepacket() {
 
     long int SNR;
     int rssicorr;
+    uint8_t buff_ack[32];
 
     if(digitalRead(dio0) == 1)
     {
@@ -416,6 +484,14 @@ void receivepacket() {
             char buff_up[TX_BUFF_SIZE]; /* buffer to compose the upstream packet */
             int buff_index=0;
 
+	    int i = setsockopt(sock_up, SOL_SOCKET, SO_RCVTIMEO,
+			    (void*) &push_timeout_half, sizeof push_timeout_half);
+    	    if (i != 0) {
+	         printf("ERR: [up] sertsockopt returned %s\n", strerror (errno));
+	         exit(EXIT_FAILURE);
+            }
+
+    
             /* gateway <-> MAC protocol variables */
             //static uint32_t net_mac_h; /* Most Significant Nibble, network order */
             //static uint32_t net_mac_l; /* Least Significant Nibble, network order */
@@ -427,10 +503,10 @@ void receivepacket() {
             /* process some of the configuration variables */
             //net_mac_h = htonl((uint32_t)(0xFFFFFFFF & (lgwm>>32)));
             //net_mac_l = htonl((uint32_t)(0xFFFFFFFF &  lgwm  ));
-            //*(uint32_t *)(buff_up + 4) = net_mac_h;
-            //*(uint32_t *)(buff_up + 8) = net_mac_l;
+            *(uint32_t *)(buff_up + 4) = net_mac_h;
+            *(uint32_t *)(buff_up + 8) = net_mac_l;
 
-            buff_up[4] = (unsigned char)ifr.ifr_hwaddr.sa_data[0];
+/*            buff_up[4] = (unsigned char)ifr.ifr_hwaddr.sa_data[0];
             buff_up[5] = (unsigned char)ifr.ifr_hwaddr.sa_data[1];
             buff_up[6] = (unsigned char)ifr.ifr_hwaddr.sa_data[2];
             buff_up[7] = 0xFF;
@@ -438,7 +514,7 @@ void receivepacket() {
             buff_up[9] = (unsigned char)ifr.ifr_hwaddr.sa_data[3];
             buff_up[10] = (unsigned char)ifr.ifr_hwaddr.sa_data[4];
             buff_up[11] = (unsigned char)ifr.ifr_hwaddr.sa_data[5];
-
+*/
             /* start composing datagram with the header */
             uint8_t token_h = (uint8_t)rand(); /* random token */
             uint8_t token_l = (uint8_t)rand(); /* random token */
@@ -522,19 +598,103 @@ void receivepacket() {
             printf("rxpk update: %s\n", (char *)(buff_up + 12)); /* DEBUG: display JSON payload */
 
             //send the messages
-            sendudp(buff_up, buff_index);
+            send(sock_up, (void *)buff_up, buff_index, 0);
+            //sendudp(buff_up, buff_index);
+	  for (int j = 0; j<2; ++j) {
+	   	 i = recv(sock_up, (void *)buff_ack, sizeof buff_ack, 0);
+    		if (i == -1) {
 
-            fflush(stdout);
+			printf("INFO: [up] ack receive is retured (%s)\n", strerror(i));
+			if(errno == EAGAIN) {
+				continue;
+			} else {
+				break;
+			}
+		} else if ((i < 4) || (buff_ack[0] != PROTOCOL_VERSION) || (buff_ack[3] != PKT_PUSH_ACK)) {
+			continue;
+		} else if ((buff_ack[1] != token_h) || (buff_ack[2] != token_l)) {
+			continue;
+		} else {
+			printf("INFO: [up] PUSH ACK received\n");
+			break;
+		}
+   	 }
+         fflush(stdout);
 
         } // received a message
 
     } // dio0=1
 }
 
+void pull_data(void) {
+	uint8_t buff_pull[16], buff_ack[8];
+        uint8_t buff_index;
+	int i = setsockopt(sock_up, SOL_SOCKET, SO_RCVTIMEO,
+			    (void*) &pull_timeout_half, sizeof pull_timeout_half);
+    	    if (i != 0) {
+	         printf("ERR: [up] sertsockopt returned %s\n", strerror (errno));
+	         exit(EXIT_FAILURE);
+            }
+
+    
+            /* gateway <-> MAC protocol variables */
+            //static uint32_t net_mac_h; /* Most Significant Nibble, network order */
+            //static uint32_t net_mac_l; /* Least Significant Nibble, network order */
+
+            /* pre-fill the data buffer with fixed fields */
+            buff_pull[0] = PROTOCOL_VERSION;
+            buff_pull[3] = PKT_PULL_DATA;
+
+            /* process some of the configuration variables */
+            //net_mac_h = htonl((uint32_t)(0xFFFFFFFF & (lgwm>>32)));
+            //net_mac_l = htonl((uint32_t)(0xFFFFFFFF &  lgwm  ));
+            *(uint32_t *)(buff_pull + 4) = net_mac_h;
+            *(uint32_t *)(buff_pull + 8) = net_mac_l;
+
+            /* start composing datagram with the header */
+            uint8_t token_h = (uint8_t)rand(); /* random token */
+            uint8_t token_l = (uint8_t)rand(); /* random token */
+            buff_pull[1] = token_h;
+            buff_pull[2] = token_l;
+            buff_index = 12; /* 12-byte header */
+   //send the messages
+            send(sock_up, (void *)buff_pull, buff_index, 0);
+            //sendudp(buff_up, buff_index);
+	  for (int j = 0; j<2; ++j) {
+	   	 i = recv(sock_up, (void *)buff_ack, sizeof buff_ack, 0);
+    		if (i == -1) {
+
+			printf("INFO: [up] ack receive is retured (%s)\n", strerror(i));
+			if(errno == EAGAIN) {
+				continue;
+			} else {
+				break;
+			}
+		} else if ((i < 4) || (buff_ack[0] != PROTOCOL_VERSION) || (buff_ack[3] != PKT_PULL_ACK)) {
+			continue;
+		} else if ((buff_ack[1] != token_h) || (buff_ack[2] != token_l)) {
+			continue;
+		} else {
+			printf("INFO: [up] PULL ACK received\n");
+			break;
+		}
+   	 }
+
+
+}
+
 int main () {
 
     struct timeval nowtime;
     uint32_t lasttime;
+
+    struct addrinfo hints;
+    struct addrinfo *result;
+    struct addrinfo *q;
+    
+    char host_name[64];
+    char port_name[64];
+    int i;
 
     wiringPiSetup () ;
     pinMode(ssPin, OUTPUT);
@@ -547,6 +707,50 @@ int main () {
 
     SetupLoRa();
 
+    strncpy(serv_addr, SERVER1, sizeof serv_addr);
+    printf("INFO: server is configured to \"%s\"\n", serv_addr);
+    snprintf(serv_port_up, sizeof serv_port_up, "%u", (uint16_t) PORT);
+    printf("INFO: upstream port is configured to \"%s\"\n", serv_port_up);
+
+    sscanf(gateway_id, "%llx", &lgwm);
+    printf("INFO: gateway MAC is configured to %016llX\n", lgwm);
+
+    net_mac_h = htonl((uint32_t)(0xFFFFFFFF & (lgwm>>32)));    
+    net_mac_l = htonl((uint32_t)(0xFFFFFFFF & (lgwm)));    
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    i = getaddrinfo(serv_addr, serv_port_up, &hints, &result);
+    if(i != 0) {
+	printf("ERR: [up] getaddrinfo on address %s (PORT %s) return %s\n", serv_addr, serv_port_up, gai_strerror(i));
+	exit(EXIT_FAILURE);
+    }
+
+    for (q=result; q!=NULL; q=q->ai_next) {
+	sock_up = socket(q->ai_family, q->ai_socktype, q->ai_protocol);
+	if (sock_up == -1) continue;
+	else break;
+    }
+
+    if (q == NULL) {
+	printf("ERR: failed to open socket to any fo server %s (port %s)\n", serv_addr, serv_port_up);
+	i =1;
+	for (q=result; q!=NULL; q=q->ai_next) {
+		getnameinfo(q->ai_addr, q->ai_addrlen, host_name, sizeof host_name, port_name, sizeof port_name, NI_NUMERICHOST);
+		printf("INFO: [up] result %i host:%s service:%s\n",i,host_name,port_name);
+		++i;
+	}
+	exit(EXIT_FAILURE);
+    }
+
+    i = connect(sock_up, q->ai_addr, q->ai_addrlen);
+    if (i != 0) {
+	printf("ERR: [up] connect returned %s\n", strerror(errno));
+    }
+    freeaddrinfo(result);
+/*   
     if ( (s=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
     {
         die("socket");
@@ -556,17 +760,20 @@ int main () {
     si_other.sin_port = htons(PORT);
 
     ifr.ifr_addr.sa_family = AF_INET;
-    strncpy(ifr.ifr_name, "eth0", IFNAMSIZ-1);  // can we rely on eth0?
+    strncpy(ifr.ifr_name, "enxb827eb3658da", IFNAMSIZ-1);  // can we rely on eth0?
     ioctl(s, SIOCGIFHWADDR, &ifr);
-
+*/
     /* display result */
-    printf("Gateway ID: %.2x:%.2x:%.2x:ff:ff:%.2x:%.2x:%.2x\n",
+/*
+ printf("Gateway ID: %.2x:%.2x:%.2x:ff:ff:%.2x:%.2x:%.2x\n",
            (unsigned char)ifr.ifr_hwaddr.sa_data[0],
            (unsigned char)ifr.ifr_hwaddr.sa_data[1],
            (unsigned char)ifr.ifr_hwaddr.sa_data[2],
            (unsigned char)ifr.ifr_hwaddr.sa_data[3],
            (unsigned char)ifr.ifr_hwaddr.sa_data[4],
-           (unsigned char)ifr.ifr_hwaddr.sa_data[5]);
+           (unsigned char)ifr.ifr_hwaddr.sa_data[5]
+	   );
+*/
 
     printf("Listening at SF%i on %.6lf Mhz.\n", sf,(double)freq/1000000);
     printf("------------------\n");
@@ -580,6 +787,7 @@ int main () {
         if (nowseconds - lasttime >= 30) {
             lasttime = nowseconds;
             sendstat();
+	    pull_data();
             cp_nb_rx_rcv = 0;
             cp_nb_rx_ok = 0;
             cp_up_pkt_fwd = 0;
