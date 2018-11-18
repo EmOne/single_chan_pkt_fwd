@@ -101,8 +101,7 @@ static struct timeval push_timeout_half = {0, (PUSH_TIMEOUT_MS * 500)};
 static struct timeval pull_timeout_half = {0, (PULL_TIMEOUT_MS * 1000)};
 
 // TODO: use host names and dns
-#define SERVER1 "lora.sclora.co.th"    // The Things Network: croft.thethings.girovito.nl
-//#define SERVER1 "localhost"    // The Things Network: croft.thethings.girovito.nl
+#define SERVER1 "localhost"    // The Things Network: croft.thethings.girovito.nl
 //#define SERVER1 "127.0.0.1"    // The Things Network: croft.thethings.girovito.nl
 //#define SERVER2 "192.168.1.10"      // local
 #define PORT 1680                   // The port on which to send data
