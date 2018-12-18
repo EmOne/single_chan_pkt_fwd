@@ -1,20 +1,45 @@
 # single_chan_pkt_fwd
 # Single Channel LoRaWAN Gateway
+### Application-specific constants
 
-CC=g++
-CFLAGS=-c -Wall
-LIBS=-lwiringPi
+APP_NAME := single_chan_pkt_fwd
 
-all: single_chan_pkt_fwd
+ARCH ?= arm
+CROSS_COMPILE ?= arm-linux-gnueabi-
 
-single_chan_pkt_fwd: base64.o main.o
-	$(CC) main.o base64.o $(LIBS) -o single_chan_pkt_fwd
+OBJDIR = obj
+INCLUDES = $(wildcard *.h)
 
-main.o: main.cpp
-	$(CC) $(CFLAGS) main.cpp
+CC := $(CROSS_COMPILE)gcc
+AR := $(CROSS_COMPILE)ar
 
-base64.o: base64.c
-	$(CC) $(CFLAGS) base64.c
+CFLAGS=-c -Wall -g -O0 -Wall -Wextra -std=c99 -I.
+
+### Linking options
+LIBS=-lwiringPi -lrt -lpthread -lm
+
+### General build targets
+
+all: $(APP_NAME)
 
 clean:
-	rm *.o single_chan_pkt_fwd	
+	rm -f $(OBJDIR)/*.o
+	rm -f $(APP_NAME)
+
+### Sub-modules compilation
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+$(OBJDIR)/%.o: src/%.c $(INCLUDES) | $(OBJDIR)
+	$(CC) -c $(CFLAGS) $< -o $@
+
+### Main program compilation and assembly
+
+$(OBJDIR)/$(APP_NAME).o: main.c $(LGW_INC) $(INCLUDES) | $(OBJDIR)
+	$(CC) -c $(CFLAGS) $(VFLAG) $< -o $@
+
+$(APP_NAME): $(OBJDIR)/main.o $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/loragw_hal.o  $(OBJDIR)/loragw_aux.o 
+	$(CC) $< $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/loragw_hal.o $(OBJDIR)/loragw_aux.o -o $@ $(LIBS)
+
+### EOF
